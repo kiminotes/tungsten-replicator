@@ -1,0 +1,155 @@
+#!/bin/bash
+# (C) Copyright 2012,2013 Continuent, Inc - Released under the New BSD License
+# Version 1.0.9 - 2013-12-18
+
+cookbook_dir=$(dirname $0)
+cd "$cookbook_dir/../"
+
+if [ ! -f $cookbook_dir/BOOTSTRAP.sh ]
+then
+    echo "$cookbook_dir/BOOTSTRAP.sh not found"
+    exit 1
+fi
+. $cookbook_dir/BOOTSTRAP.sh NODES_MASTER_SLAVE.sh
+
+check_installed
+check_if_nodes_are_reachable
+check_for_deprecated_installer
+
+# $cookbook_dir/clear_cluster
+
+export MASTER=${MASTERS[0]}
+
+echo "installing MASTER/SLAVE" >$INSTALL_LOG
+date >> $INSTALL_LOG
+
+if [ -n "$DRYRUN" ]
+then
+    echo "WARNING: DRYRUN is deprecated - Future versions of Tungsten Cookbook will only support tpm-based installations"
+    [ -z "$VERBOSE" ] && VERBOSE=1
+fi 
+
+COMMAND_SEQUENCE=1
+
+
+if [ -n "$VALIDATE_ONLY"  ]
+then
+    export USE_TPM=1
+    MORE_OPTIONS="$MORE_OPTIONS --validate-only -a"
+    if [ -n "$VERBOSE" ]
+    then
+        if [ "$VERBOSE" -gt "1" ]
+        then
+            MORE_OPTIONS="$MORE_OPTIONS --verbose"
+        else
+            MORE_OPTIONS="$MORE_OPTIONS --info"
+        fi
+    fi
+    echo "# Performing validation check ..."
+fi
+
+if [ -n "$DRYRUN" ]
+then
+    for NODE in $MASTER ${SLAVES[*]}
+    do
+      INSTALL_COMMAND="./tools/tungsten-installer \
+        --master-slave \
+        --master-host=$MASTER \
+        --datasource-user=$DATABASE_USER \
+        --datasource-password=$DATABASE_PASSWORD \
+        --datasource-port=$DATABASE_PORT \
+        --service-name=$TUNGSTEN_SERVICE \
+        --home-directory=$TUNGSTEN_BASE \
+        --cluster-hosts=$NODE \
+        --datasource-mysql-conf=$MY_CNF \
+        -a --datasource-boot-script=$MYSQL_BOOT_SCRIPT \
+        --datasource-log-directory=$BINLOG_DIRECTORY \
+        --rmi-port=$RMI_PORT \
+        --thl-port=$THL_PORT \
+        $MORE_OPTIONS --$START_OPTION"     
+
+        echo "## $COMMAND_SEQUENCE (host: $NODE)" >> $INSTALL_LOG
+        echo $INSTALL_COMMAND | perl -pe 's/--/\\\n\t--/g' >> $INSTALL_LOG
+        echo "## $COMMAND_SEQUENCE (host: $NODE )"
+        echo $INSTALL_COMMAND | perl -pe 's/--/\\\n\t--/g'
+        COMMAND_SEQUENCE=$(($COMMAND_SEQUENCE+1))
+    done
+
+else
+    if [ -n "$USE_TPM" ]
+    then
+        check_security
+        rm -f deploy.cfg*
+        if [ -n "$VERBOSE" ]
+        then
+            echo "# Using tpm"
+        fi
+        INSTALL_COMMAND="./tools/tpm install $TUNGSTEN_SERVICE \
+        --reset \
+        --master=$MASTER \
+        --log=timestamp \
+        --replication-user=$DATABASE_USER \
+        --replication-password=$DATABASE_PASSWORD \
+        --replication-port=$DATABASE_PORT \
+        --home-directory=$TUNGSTEN_BASE \
+        --slaves=$SLAVES_LIST \
+        --datasource-mysql-conf=$MY_CNF \
+        --datasource-log-directory=$BINLOG_DIRECTORY \
+        -a --datasource-boot-script=$MYSQL_BOOT_SCRIPT \
+        --repl-disable-relay-logs=true \
+        --rmi-port=$RMI_PORT \
+        --thl-port=$THL_PORT \
+        --topology=master-slave \
+        $MORE_OPTIONS $MORE_TPM_OPTIONS $SECURITY_OPTIONS --$START_OPTION"     
+    else
+        INSTALL_COMMAND="./tools/tungsten-installer \
+            --master-slave \
+            --master-host=$MASTER \
+            --datasource-user=$DATABASE_USER \
+            --datasource-password=$DATABASE_PASSWORD \
+            --datasource-port=$DATABASE_PORT \
+            --service-name=$TUNGSTEN_SERVICE \
+            --home-directory=$TUNGSTEN_BASE \
+            --cluster-hosts=$HOSTS_LIST \
+            --datasource-mysql-conf=$MY_CNF \
+            --disable-relay-logs \
+            --datasource-log-directory=$BINLOG_DIRECTORY \
+            -a --datasource-boot-script=$MYSQL_BOOT_SCRIPT \
+            --rmi-port=$RMI_PORT \
+            --thl-port=$THL_PORT \
+            $MORE_OPTIONS --$START_OPTION"     
+    fi
+
+    if [ -n "$VERBOSE" ]
+    then
+        echo "## $COMMAND_SEQUENCE (host: $(hostname))"
+        echo $INSTALL_COMMAND | perl -pe 's/--/\\\n\t--/g'
+    fi
+    COMMAND_SEQUENCE=$(($COMMAND_SEQUENCE+1))
+
+    echo $INSTALL_COMMAND | perl -pe 's/--/\\\n\t--/g' >> $INSTALL_LOG
+
+    $INSTALL_COMMAND
+
+    if [ "$?" != "0"  ]
+    then
+        exit 1
+    fi
+fi
+
+if [ -n "$VALIDATE_ONLY" ]
+then
+    exit 0
+fi
+
+if  [ -n "$DRYRUN" ]
+then
+    echo "## $COMMAND_SEQUENCE (host: $(hostname)"
+    echo "echo 'master_slave' > $CURRENT_TOPOLOGY"
+    exit
+fi
+echo "master_slave" > $CURRENT_TOPOLOGY
+
+$cookbook_dir/show_cluster 
+
+post_installation

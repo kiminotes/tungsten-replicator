@@ -1,0 +1,158 @@
+#!/bin/bash
+# (C) Copyright 2012,2013 Continuent, Inc - Released under the New BSD License
+# Version 1.0.9 - 2013-12-18
+
+cookbook_dir=$(dirname $0)
+cd "$cookbook_dir/../"
+
+if [ ! -f $cookbook_dir/BOOTSTRAP.sh ]
+then
+    echo "$cookbook_dir/BOOTSTRAP.sh not found"
+    exit 1
+fi
+. $cookbook_dir/BOOTSTRAP.sh NODES_ALL_MASTERS.sh
+. $cookbook_dir/utilities.sh
+
+check_installed
+check_if_nodes_are_reachable
+check_for_deprecated_installer
+# $cookbook_dir/clear_cluster
+
+echo "installing ALL_MASTERS" >$INSTALL_LOG
+date >> $INSTALL_LOG
+if [ -n "$DRYRUN" ]
+then
+    echo "WARNING: DRYRUN is deprecated - Future versions of Tungsten Cookbook will only support tpm-based installations"
+    [ -z "$VERBOSE" ] && VERBOSE=1
+fi 
+
+COMMAND_SEQUENCE=1
+
+# install all masters
+if [ -n "$USE_TPM" ]
+then
+    check_security
+    INSTALL_COMMAND="./tools/tpm install all_masters --reset \
+        --log=timestamp \
+        --replication-port=$DATABASE_PORT \
+        --replication-user=$DATABASE_USER \
+        --replication-password=$DATABASE_PASSWORD \
+        --datasource-log-directory=$BINLOG_DIRECTORY \
+        --home-directory=$TUNGSTEN_BASE \
+        --datasource-mysql-conf=$MY_CNF \
+        --datasource-log-directory=$BINLOG_DIRECTORY \
+        --repl-disable-relay-logs=true \
+        -a --datasource-boot-script=$MYSQL_BOOT_SCRIPT \
+        --rmi-port=$RMI_PORT \
+        --thl-port=$THL_PORT \
+        --masters=$MASTERS_LIST \
+        --master-services=$MASTER_SERVICES_LIST \
+        --topology=all-masters \
+        $MORE_OPTIONS $MORE_TPM_OPTIONS $SECURITY_OPTIONS --$START_OPTION"
+
+    run_command $INSTALL_COMMAND 
+ else
+    INDEX=0
+    for NODE in ${MASTERS[*]}
+    do
+      INSTALL_COMMAND="./tools/tungsten-installer \
+        --master-slave \
+        --master-host=$NODE \
+        --datasource-port=$DATABASE_PORT \
+        --datasource-user=$DATABASE_USER \
+        --datasource-password=$DATABASE_PASSWORD \
+        --datasource-log-directory=$BINLOG_DIRECTORY \
+        --service-name=${MM_SERVICES[$INDEX]} \
+        --home-directory=$TUNGSTEN_BASE \
+        --cluster-hosts=$NODE \
+        --disable-relay-logs \
+        --datasource-mysql-conf=$MY_CNF \
+        --datasource-log-directory=$BINLOG_DIRECTORY \
+        -a --datasource-boot-script=$MYSQL_BOOT_SCRIPT \
+        --rmi-port=$RMI_PORT \
+        --thl-port=$THL_PORT \
+        $MORE_OPTIONS --$START_OPTION"
+
+        echo "## $COMMAND_SEQUENCE (host: $NODE)" >> $INSTALL_LOG
+        echo $INSTALL_COMMAND  | perl -pe 's/--/\\\n\t--/g' >> $INSTALL_LOG
+        if [ -n "$VERBOSE" ]
+        then
+            echo "## $COMMAND_SEQUENCE (host: $NODE)"
+            echo $INSTALL_COMMAND | perl -pe 's/--/\\\n\t--/g'
+        fi
+        COMMAND_SEQUENCE=$(($COMMAND_SEQUENCE+1))
+
+        if [ -z "$DRYRUN" ]
+        then
+            $INSTALL_COMMAND
+
+            if [ "$?" != "0"  ]
+            then
+                exit 1
+            fi
+        fi
+        INDEX=$(($INDEX+1))
+    done
+
+    TUNGSTEN_TOOLS=$TUNGSTEN_BASE/tungsten/tools
+
+    # set -x
+    S_INDEX=0
+    for SLAVE in ${SLAVES[*]}
+    do
+        M_INDEX=0
+        for MASTER in ${MASTERS[*]}
+        do
+            if [ "$SLAVE" != "$MASTER" ]
+            then
+                SLAVE_DS=`echo $SLAVE|perl -lpe's/\W/_/g'`
+
+                INSTALL_COMMAND="$TUNGSTEN_TOOLS/configure-service \
+                -C --quiet \
+                --host=$SLAVE \
+                --datasource=$SLAVE_DS \
+                --local-service-name=${MM_SERVICES[$S_INDEX]} \
+                --role=slave \
+                --service-type=remote \
+                --release-directory=$TUNGSTEN_BASE/tungsten \
+                --skip-validation-check=THLStorageCheck \
+                --master-thl-host=$MASTER \
+                --master-thl-port=$THL_PORT \
+                --svc-$START_OPTION ${MM_SERVICES[$M_INDEX]} "
+
+                echo "## $COMMAND_SEQUENCE (host: $SLAVE)" >> $INSTALL_LOG
+                echo $INSTALL_COMMAND | perl -pe 's/--/\\\n\t--/g' >> $INSTALL_LOG
+                if [ -n "$VERBOSE" ]
+                then
+                    echo "## $COMMAND_SEQUENCE (host: $SLAVE)"
+                    echo $INSTALL_COMMAND | perl -pe 's/--/\\\n\t--/g'
+                fi
+
+                COMMAND_SEQUENCE=$(($COMMAND_SEQUENCE+1))
+
+                if [ -z "$DRYRUN" ]
+                then
+                    $INSTALL_COMMAND
+                    if [ "$?" != "0"  ]
+                    then
+                        exit 1
+                    fi
+                fi
+            fi
+            M_INDEX=$(($M_INDEX+1))
+        done
+        S_INDEX=$(($S_INDEX+1))
+    done
+fi
+
+# set +x
+if  [ -n "$DRYRUN" ]
+then
+    echo "## $COMMAND_SEQUENCE (host: $(hostname)"
+    echo "echo 'all_masters' > $CURRENT_TOPOLOGY"
+    exit
+fi
+
+echo "all_masters" > $CURRENT_TOPOLOGY
+$cookbook_dir/show_cluster 
+post_installation
